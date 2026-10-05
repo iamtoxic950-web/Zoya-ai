@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .bg-mesh {
+    background-color: #00080a;
+    background-image: 
+      linear-gradient(rgba(0, 229, 255, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 229, 255, 0.05) 1px, transparent 1px),
+      radial-gradient(circle at 50% 50%, rgba(0, 139, 153, 0.1) 0%, transparent 60%);
+    background-size: 30px 30px, 30px 30px, 100% 100%;
+    background-position: center center;
+  }
+  
+  .glass-panel {
+    background: rgba(0, 15, 20, 0.6);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(0, 229, 255, 0.2);
+    border-radius: 8px;
+    box-shadow: 0 0 20px rgba(0, 229, 255, 0.1) inset;
+  }
+}
+
+@keyframes scan {
+  0%, 80% { background-position: 0 0; opacity: 0; }
+  85% { opacity: 0.15; }
+  90% { background-position: 0 100%; opacity: 0.15; }
+  95%, 100% { opacity: 0; background-position: 0 100%; }
+}
+
+@keyframes progress {
+  0% { transform: scaleX(0); }
+  50% { transform: scaleX(0.7); }
+  100% { transform: scaleX(1); }
+}
+
+@layer utilities {
+  .animate-scan {
+    animation: scan 12s linear infinite;
+  }
+}
+
+@keyframes gradient-pan {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@layer utilities {
+  .animate-gradient {
+    background-size: 200% 200%;
+    animation: gradient-pan 30s ease infinite;
+  }
+}
+
+@layer utilities {
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .hide-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}

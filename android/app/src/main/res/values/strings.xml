@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Zoya</string>
+    <string name="title_activity_main">Zoya</string>
+    <string name="package_name">com.zoya.app</string>
+    <string name="custom_url_scheme">com.zoya.app</string>
+    <string name="accessibility_service_description">Zoya AI Assistant requires Accessibility Service to read the screen content for AI analysis and perform automated taps and swipes on your behalf.</string>
+</resources>

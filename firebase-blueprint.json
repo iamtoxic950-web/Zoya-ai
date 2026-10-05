@@ -1,0 +1,136 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile document storing basic authenticated user identity",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 256 },
+        "displayName": { "type": "string", "maxLength": 128 },
+        "photoURL": { "type": "string", "maxLength": 1024 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["uid"]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "User preferences for Zoya AI personality, voice, and visual core",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "personalityMode": { "type": "string", "maxLength": 64 },
+        "voiceName": { "type": "string", "maxLength": 32 },
+        "autoSpeakChat": { "type": "boolean" },
+        "responseStyle": { "type": "string", "maxLength": 32 },
+        "glowIntensity": { "type": "string", "maxLength": 32 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["uid", "personalityMode", "voiceName"]
+    },
+    "MemoryItem": {
+      "title": "MemoryItem",
+      "description": "Long-term persistent memory engram retained by Zoya AI",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "content": { "type": "string", "maxLength": 2048 },
+        "category": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["id", "uid", "content"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "Conversation session header containing title and timestamps",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 256 },
+        "type": { "type": "string", "maxLength": 32 },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["id", "uid", "title"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Individual message within a conversation",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "conversationId": { "type": "string", "maxLength": 128 },
+        "role": { "type": "string", "maxLength": 32 },
+        "content": { "type": "string", "maxLength": 16384 },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["id", "uid", "conversationId", "role", "content", "timestamp"]
+    },
+    "Reminder": {
+      "title": "Reminder",
+      "description": "Temporal reminder item with schedule and completion state",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 256 },
+        "note": { "type": "string", "maxLength": 1024 },
+        "scheduledAt": { "type": "string", "maxLength": 64 },
+        "repeatRule": { "type": "string", "maxLength": 32 },
+        "completed": { "type": "boolean" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["id", "uid", "title", "scheduledAt", "completed"]
+    },
+    "GeneratedImageMetadata": {
+      "title": "GeneratedImageMetadata",
+      "description": "Metadata record of a synthesized visual creation (no heavy binaries stored)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "prompt": { "type": "string", "maxLength": 1024 },
+        "aspectRatio": { "type": "string", "maxLength": 16 },
+        "createdAt": { "type": "number" },
+        "provider": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "uid", "prompt", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profile document"
+    },
+    "/users/{uid}/settings/preferences": {
+      "schema": { "$ref": "#/entities/UserSettings" },
+      "description": "User preferences for Zoya AI"
+    },
+    "/users/{uid}/memories/{memoryId}": {
+      "schema": { "$ref": "#/entities/MemoryItem" },
+      "description": "User persistent memory engrams"
+    },
+    "/users/{uid}/conversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/Conversation" },
+      "description": "User conversation sessions"
+    },
+    "/users/{uid}/conversations/{conversationId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Individual messages in a user conversation"
+    },
+    "/users/{uid}/reminders/{reminderId}": {
+      "schema": { "$ref": "#/entities/Reminder" },
+      "description": "User temporal reminders"
+    },
+    "/users/{uid}/generatedImages/{imageId}": {
+      "schema": { "$ref": "#/entities/GeneratedImageMetadata" },
+      "description": "Metadata for user synthesized images"
+    }
+  }
+}

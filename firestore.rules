@@ -1,0 +1,86 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny all access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Connection health check route (used by SDK initial connection verification)
+    match /test/connection {
+      allow read: if true;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    // User scope: strictly isolated per authenticated user
+    match /users/{uid} {
+      allow get: if isOwner(uid);
+      allow create, update: if isOwner(uid) && incoming().uid == uid;
+      allow delete: if isOwner(uid);
+
+      // User Settings & Preferences
+      match /settings/{docId} {
+        allow get: if isOwner(uid);
+        allow create, update: if isOwner(uid) && incoming().uid == uid;
+        allow delete: if isOwner(uid);
+      }
+
+      // User Long-term Persistent Memories
+      match /memories/{memoryId} {
+        allow get, list: if isOwner(uid);
+        allow create: if isOwner(uid) && incoming().uid == uid && isValidId(memoryId);
+        allow update: if isOwner(uid) && incoming().uid == uid;
+        allow delete: if isOwner(uid);
+      }
+
+      // User Conversation Archives
+      match /conversations/{conversationId} {
+        allow get, list: if isOwner(uid);
+        allow create: if isOwner(uid) && incoming().uid == uid && isValidId(conversationId);
+        allow update: if isOwner(uid) && incoming().uid == uid;
+        allow delete: if isOwner(uid);
+
+        // Messages inside Conversation
+        match /messages/{messageId} {
+          allow get, list: if isOwner(uid);
+          allow create: if isOwner(uid) && incoming().uid == uid && isValidId(messageId);
+          allow update: if isOwner(uid) && incoming().uid == uid;
+          allow delete: if isOwner(uid);
+        }
+      }
+
+      // User Reminders
+      match /reminders/{reminderId} {
+        allow get, list: if isOwner(uid);
+        allow create: if isOwner(uid) && incoming().uid == uid && isValidId(reminderId);
+        allow update: if isOwner(uid) && incoming().uid == uid;
+        allow delete: if isOwner(uid);
+      }
+
+      // User Generated Image Metadata (no binary blobs)
+      match /generatedImages/{imageId} {
+        allow get, list: if isOwner(uid);
+        allow create: if isOwner(uid) && incoming().uid == uid && isValidId(imageId);
+        allow update: if isOwner(uid) && incoming().uid == uid;
+        allow delete: if isOwner(uid);
+      }
+    }
+  }
+}
