@@ -14,6 +14,7 @@ import { Conversation, ChatMessage, ZoyaPersonalityMode } from '../../types';
 import { chatHistoryService } from '../../services/ChatHistoryService';
 import { settingsService } from '../../services/SettingsService';
 import { memoryService } from '../../services/MemoryService';
+import { auth } from '../../lib/firebase';
 
 interface ChatViewProps {
   onBackToVoice: () => void;
@@ -74,9 +75,16 @@ export function ChatView({ onBackToVoice, onOpenMenu, personalityMode }: ChatVie
 
     try {
       // 2. Fetch Zoya reply from API with personality and memories
+      const user = auth.currentUser;
+      const token = user ? await user.getIdToken().catch(() => null) : null;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
       const response = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           text,
           personalityMode,
@@ -86,6 +94,9 @@ export function ChatView({ onBackToVoice, onOpenMenu, personalityMode }: ChatVie
       });
 
       if (!response.ok) {
+        if (response.status === 401) {
+          throw new Error('Please sign in with Google in the menu to connect your personal chat session.');
+        }
         throw new Error(`Server returned ${response.status}`);
       }
 

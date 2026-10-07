@@ -88,25 +88,44 @@ export function pcmToWavBase64(pcmData: Float32Array, inputSampleRate = 16000): 
 }
 
 export function base64ToPcm(base64: string): Float32Array {
+  if (!base64 || typeof base64 !== 'string') return new Float32Array(0);
   const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
+  const len = binary.length;
+  if (len < 2) return new Float32Array(0);
+
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
     bytes[i] = binary.charCodeAt(i);
   }
+
   // If the audio buffer begins with a 44-byte RIFF/WAVE header, skip the header bytes
   const hasRiffHeader =
-    bytes.byteLength > 44 &&
+    bytes.length >= 44 &&
     bytes[0] === 0x52 && // 'R'
     bytes[1] === 0x49 && // 'I'
     bytes[2] === 0x46 && // 'F'
     bytes[3] === 0x46;   // 'F'
   const byteOffset = hasRiffHeader ? 44 : 0;
-  const usableByteLength = bytes.byteLength - byteOffset;
+  const usableByteLength = bytes.length - byteOffset;
   const sampleCount = Math.floor(usableByteLength / 2);
-  const view = new DataView(bytes.buffer, byteOffset, sampleCount * 2);
+  if (sampleCount <= 0) return new Float32Array(0);
+
+  // Create an aligned ArrayBuffer to avoid any subarray offset or alignment discrepancies
+  const alignedBuffer = bytes.slice(byteOffset, byteOffset + sampleCount * 2).buffer;
+  const view = new DataView(alignedBuffer);
   const pcm = new Float32Array(sampleCount);
   for (let i = 0; i < sampleCount; i++) {
-    pcm[i] = view.getInt16(i * 2, true) / 0x8000;
+    pcm[i] = view.getInt16(i * 2, true) / 32768.0;
   }
+
+  // Micro fade-in and fade-out (64 samples ~= 2.6ms at 24kHz) to eliminate audio clicks,
+  // radio static bursts, and digital pop artifacts at chunk boundaries and speech termination.
+  const fadeLength = Math.min(64, Math.floor(sampleCount / 4));
+  for (let i = 0; i < fadeLength; i++) {
+    const factor = 0.5 * (1 - Math.cos((Math.PI * i) / fadeLength));
+    pcm[i] *= factor;
+    pcm[sampleCount - 1 - i] *= factor;
+  }
+
   return pcm;
 }

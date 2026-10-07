@@ -70,9 +70,16 @@ class ImageGenerationService {
 
     let response: Response;
     try {
+      const user = auth.currentUser;
+      const token = user ? await user.getIdToken().catch(() => null) : null;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
       response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           prompt: trimmed,
           aspectRatio
@@ -91,6 +98,14 @@ class ImageGenerationService {
     const hasError = !response.ok || data.success === false || Boolean(data.error && !data.imageUrl);
 
     if (hasError) {
+      if (response.status === 401) {
+        throw {
+          type: 'UNKNOWN',
+          message: 'Please sign in with Google in the menu to generate images.',
+          canRetry: false
+        } as ImageGenerationError;
+      }
+
       const errText = (data.error || '').toLowerCase();
       const isPaidRequired = data.requiresPaidKey || errText.includes('limit: 0') || errText.includes('freetier') || errText.includes('billing') || errText.includes('paid');
       const isQuota = data.isQuota || response.status === 429 || errText.includes('quota') || errText.includes('resource_exhausted');

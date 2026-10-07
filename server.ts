@@ -6,44 +6,419 @@ import { GoogleGenAI, Modality, Type, ThinkingLevel } from '@google/genai';
 import http from 'http';
 import dotenv from 'dotenv';
 import fs from 'fs';
+import { initializeApp as initAdminApp, getApps as getAdminApps, cert as adminCert, type App as AdminApp } from 'firebase-admin/app';
+import { getAuth as getAdminAuth, type DecodedIdToken } from 'firebase-admin/auth';
+import { getFirestore as getAdminFirestore, type Firestore as AdminFirestore } from 'firebase-admin/firestore';
 
 dotenv.config();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
-// Persistent server-side memory storage fallback
-// In-memory runtime cache for transient active sessions (Cloud Firestore is the permanent database)
-let serverMemories: Array<{ id: string; content: string; category?: string; timestamp: number }> = [];
-let serverReminders: Array<{
-  id: string;
-  title: string;
-  datetime: string;
-  repeat: string;
-  note?: string;
-  completed: boolean;
-  createdAt: number;
-}> = [];
-let serverConversations: Array<{
-  id: string;
-  title: string;
-  createdAt: number;
-  updatedAt: number;
-  type: string;
-  messages: Array<{
-    id: string;
-    sender: 'user' | 'zoya';
-    text: string;
-    timestamp: number;
-  }>;
-}> = [];
+// Initialize Firebase Admin SDK for backend Firestore persistence & auth verification
+let firebaseAdminApp: AdminApp | null = null;
+let firestoreDb: AdminFirestore | null = null;
 
-function saveServerMemories() {}
-function saveServerReminders() {}
-function saveServerConversations() {}
+function initializeFirebaseAdmin() {
+  let appletConfig: any = null;
+  try {
+    const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
+    if (fs.existsSync(configPath)) {
+      appletConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    }
+  } catch {}
 
-function getMemoryContextPrompt(): string {
-  if (serverMemories.length === 0) return '';
-  const lines = serverMemories.slice(0, 25).map(m => `- ${m.content}`);
+  const targetDbId = process.env.FIREBASE_DATABASE_ID || appletConfig?.firestoreDatabaseId;
+
+  const existingApps = getAdminApps();
+  if (existingApps.length > 0) {
+    firebaseAdminApp = existingApps[0]!;
+    firestoreDb = (targetDbId && targetDbId !== '(default)')
+      ? getAdminFirestore(firebaseAdminApp, targetDbId)
+      : getAdminFirestore(firebaseAdminApp);
+    return;
+  }
+
+  let projectId = process.env.FIREBASE_PROJECT_ID || appletConfig?.projectId;
+  let clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+  let privateKeyRaw = process.env.FIREBASE_PRIVATE_KEY || process.env.FIREBASE_SERVICE_ACCOUNT;
+
+  // Handle case where user passes the entire service-account JSON in FIREBASE_PRIVATE_KEY or FIREBASE_SERVICE_ACCOUNT
+  if (privateKeyRaw) {
+    const trimmed = privateKeyRaw.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed.project_id) projectId = parsed.project_id;
+        if (parsed.client_email) clientEmail = parsed.client_email;
+        if (parsed.private_key) privateKeyRaw = parsed.private_key;
+      } catch (e: any) {
+        console.warn('[Firebase Admin] Notice: could not parse JSON credential block:', e.message);
+      }
+    }
+  }
+
+  if (projectId && clientEmail && privateKeyRaw) {
+    try {
+      let privateKey = privateKeyRaw.trim();
+      // Strip enclosing quotes if user wrapped the key string in quotes
+      if ((privateKey.startsWith('"') && privateKey.endsWith('"')) || (privateKey.startsWith("'") && privateKey.endsWith("'"))) {
+        privateKey = privateKey.slice(1, -1);
+      }
+      privateKey = privateKey.replace(/\\n/g, '\n');
+
+      firebaseAdminApp = initAdminApp({
+        credential: adminCert({
+          projectId,
+          clientEmail,
+          privateKey,
+        }),
+        projectId,
+      });
+
+      firestoreDb = (targetDbId && targetDbId !== '(default)')
+        ? getAdminFirestore(firebaseAdminApp, targetDbId)
+        : getAdminFirestore(firebaseAdminApp);
+
+      console.log(`[Firebase Admin] Initialized successfully for project: ${projectId} (DB: ${targetDbId || '(default)'})`);
+      return;
+    } catch (e: any) {
+      console.error('[Firebase Admin] Error initializing with provided credentials:', e.message);
+    }
+  }
+
+  // Graceful fallback for application default credentials
+  try {
+    firebaseAdminApp = initAdminApp({
+      projectId,
+    });
+    firestoreDb = (targetDbId && targetDbId !== '(default)')
+      ? getAdminFirestore(firebaseAdminApp, targetDbId)
+      : getAdminFirestore(firebaseAdminApp);
+    console.log('[Firebase Admin] Initialized with application default credentials.');
+  } catch {
+    console.warn('[Firebase Admin] Notice: FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY not set.');
+  }
+}
+
+initializeFirebaseAdmin();
+
+// Authentication middleware verifying Bearer <Firebase_ID_TOKEN>
+export interface AuthenticatedRequest extends express.Request {
+  uid?: string;
+  decodedToken?: DecodedIdToken;
+}
+
+async function verifyFirebaseToken(req: AuthenticatedRequest, res: express.Response, next: express.NextFunction) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      error: 'Unauthorized: Missing or malformed Authorization header with Bearer token'
+    });
+  }
+
+  const idToken = authHeader.split('Bearer ')[1]?.trim();
+  if (!idToken) {
+    return res.status(401).json({
+      error: 'Unauthorized: Bearer token is empty'
+    });
+  }
+
+  if (!firebaseAdminApp) {
+    return res.status(500).json({
+      error: 'Firebase Admin SDK is not initialized on the server. Please check FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY.'
+    });
+  }
+
+  try {
+    const decoded = await getAdminAuth(firebaseAdminApp).verifyIdToken(idToken);
+    req.uid = decoded.uid;
+    req.decodedToken = decoded;
+    next();
+  } catch (err: any) {
+    const code = err?.code || '';
+    if (code === 'auth/id-token-expired') {
+      return res.status(401).json({ error: 'Token expired', code: 'auth/id-token-expired' });
+    }
+    return res.status(401).json({ error: 'Invalid authentication token', details: 'Token verification failed' });
+  }
+}
+
+// ============================================================================
+// FIRESTORE PER-USER DATA PERSISTENCE LAYER (Source of Truth)
+// Structure:
+//   users/{uid}/memories/{memoryId}
+//   users/{uid}/reminders/{reminderId}
+//   users/{uid}/conversations/{conversationId}
+// ============================================================================
+
+async function getUserMemories(uid: string): Promise<Array<{ id: string; content: string; category?: string; timestamp: number }>> {
+  if (!firestoreDb) return [];
+  try {
+    const snap = await firestoreDb.collection('users').doc(uid).collection('memories').orderBy('createdAt', 'desc').limit(100).get();
+    return snap.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        content: data.content || '',
+        category: data.category || 'general',
+        timestamp: data.updatedAt || data.createdAt || Date.now()
+      };
+    });
+  } catch (e: any) {
+    console.error(`[Firestore] Error loading memories for user ${uid}:`, e.message);
+    return [];
+  }
+}
+
+async function saveUserMemory(uid: string, memory: { id?: string; content: string; category?: string }): Promise<{ id: string; content: string; category?: string; timestamp: number }> {
+  if (!firestoreDb) throw new Error('Firestore is not initialized');
+  const memoryId = memory.id || `mem_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+  const docRef = firestoreDb.collection('users').doc(uid).collection('memories').doc(memoryId);
+  const now = Date.now();
+  const data = {
+    id: memoryId,
+    uid,
+    content: memory.content.trim(),
+    category: memory.category || 'general',
+    createdAt: now,
+    updatedAt: now
+  };
+  await docRef.set(data, { merge: true });
+  return {
+    id: memoryId,
+    content: data.content,
+    category: data.category,
+    timestamp: now
+  };
+}
+
+async function updateUserMemory(uid: string, id: string, updates: { content?: string; category?: string }) {
+  if (!firestoreDb) throw new Error('Firestore is not initialized');
+  const docRef = firestoreDb.collection('users').doc(uid).collection('memories').doc(id);
+  const snap = await docRef.get();
+  if (!snap.exists) return null;
+  const updateData: any = { updatedAt: Date.now() };
+  if (updates.content) updateData.content = updates.content.trim();
+  if (updates.category) updateData.category = updates.category.trim();
+  await docRef.update(updateData);
+  const docData = (await docRef.get()).data()!;
+  return {
+    id,
+    content: docData.content,
+    category: docData.category,
+    timestamp: docData.updatedAt || Date.now()
+  };
+}
+
+async function deleteUserMemory(uid: string, id: string): Promise<boolean> {
+  if (!firestoreDb) throw new Error('Firestore is not initialized');
+  await firestoreDb.collection('users').doc(uid).collection('memories').doc(id).delete();
+  return true;
+}
+
+async function clearAllUserMemories(uid: string): Promise<void> {
+  if (!firestoreDb) throw new Error('Firestore is not initialized');
+  const snap = await firestoreDb.collection('users').doc(uid).collection('memories').get();
+  if (snap.empty) return;
+  const batch = firestoreDb.batch();
+  snap.docs.forEach(doc => batch.delete(doc.ref));
+  await batch.commit();
+}
+
+async function getUserReminders(uid: string) {
+  if (!firestoreDb) return [];
+  try {
+    const snap = await firestoreDb.collection('users').doc(uid).collection('reminders').orderBy('createdAt', 'desc').limit(100).get();
+    return snap.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        title: data.title || '',
+        datetime: data.datetime || data.scheduledAt || new Date().toISOString(),
+        repeat: data.repeat || data.repeatRule || 'none',
+        note: data.note || undefined,
+        completed: Boolean(data.completed),
+        createdAt: data.createdAt || Date.now()
+      };
+    });
+  } catch (e: any) {
+    console.error(`[Firestore] Error loading reminders for user ${uid}:`, e.message);
+    return [];
+  }
+}
+
+async function saveUserReminder(uid: string, reminder: { id?: string; title: string; datetime?: string; repeat?: string; note?: string; completed?: boolean; createdAt?: number }) {
+  if (!firestoreDb) throw new Error('Firestore is not initialized');
+  const reminderId = reminder.id || `rem_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+  const docRef = firestoreDb.collection('users').doc(uid).collection('reminders').doc(reminderId);
+  const now = reminder.createdAt || Date.now();
+  const dt = reminder.datetime || new Date(Date.now() + 3600000).toISOString();
+  const rep = reminder.repeat || 'none';
+  const data = {
+    id: reminderId,
+    uid,
+    title: reminder.title.trim(),
+    datetime: dt,
+    scheduledAt: dt,
+    repeat: rep,
+    repeatRule: rep,
+    note: reminder.note ? String(reminder.note).trim() : null,
+    completed: Boolean(reminder.completed),
+    createdAt: now,
+    updatedAt: Date.now()
+  };
+  await docRef.set(data, { merge: true });
+  return {
+    id: reminderId,
+    title: data.title,
+    datetime: data.datetime,
+    repeat: data.repeat,
+    note: data.note || undefined,
+    completed: data.completed,
+    createdAt: data.createdAt
+  };
+}
+
+async function updateUserReminder(uid: string, id: string, updates: any) {
+  if (!firestoreDb) throw new Error('Firestore is not initialized');
+  const docRef = firestoreDb.collection('users').doc(uid).collection('reminders').doc(id);
+  const snap = await docRef.get();
+  if (!snap.exists) return null;
+  const updateData: any = { updatedAt: Date.now() };
+  if (updates.title !== undefined) updateData.title = String(updates.title).trim();
+  if (updates.datetime !== undefined) {
+    updateData.datetime = updates.datetime;
+    updateData.scheduledAt = updates.datetime;
+  }
+  if (updates.repeat !== undefined) {
+    updateData.repeat = updates.repeat;
+    updateData.repeatRule = updates.repeat;
+  }
+  if (updates.note !== undefined) updateData.note = updates.note ? String(updates.note).trim() : null;
+  if (updates.completed !== undefined) updateData.completed = Boolean(updates.completed);
+  await docRef.update(updateData);
+  const docData = (await docRef.get()).data()!;
+  return {
+    id,
+    title: docData.title,
+    datetime: docData.datetime || docData.scheduledAt,
+    repeat: docData.repeat || docData.repeatRule || 'none',
+    note: docData.note || undefined,
+    completed: Boolean(docData.completed),
+    createdAt: docData.createdAt || Date.now()
+  };
+}
+
+async function deleteUserReminder(uid: string, id: string): Promise<boolean> {
+  if (!firestoreDb) throw new Error('Firestore is not initialized');
+  await firestoreDb.collection('users').doc(uid).collection('reminders').doc(id).delete();
+  return true;
+}
+
+async function getUserConversations(uid: string) {
+  if (!firestoreDb) return [];
+  try {
+    const snap = await firestoreDb.collection('users').doc(uid).collection('conversations').orderBy('updatedAt', 'desc').limit(50).get();
+    return snap.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        title: data.title || 'Conversation',
+        createdAt: data.createdAt || Date.now(),
+        updatedAt: data.updatedAt || Date.now(),
+        type: data.type || 'text',
+        messages: Array.isArray(data.messages) ? data.messages : []
+      };
+    });
+  } catch (e: any) {
+    console.error(`[Firestore] Error loading conversations for user ${uid}:`, e.message);
+    return [];
+  }
+}
+
+async function saveUserConversation(uid: string, conv: any) {
+  if (!firestoreDb) throw new Error('Firestore is not initialized');
+  const convId = conv.id || `conv_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+  const docRef = firestoreDb.collection('users').doc(uid).collection('conversations').doc(convId);
+  const now = Date.now();
+  const data = {
+    id: convId,
+    uid,
+    title: conv.title ? String(conv.title).trim() : 'New Conversation',
+    type: conv.type || 'text',
+    createdAt: conv.createdAt || now,
+    updatedAt: conv.updatedAt || now,
+    messages: Array.isArray(conv.messages) ? conv.messages : []
+  };
+  await docRef.set(data, { merge: true });
+  return data;
+}
+
+async function updateUserConversation(uid: string, id: string, updates: any) {
+  if (!firestoreDb) throw new Error('Firestore is not initialized');
+  const docRef = firestoreDb.collection('users').doc(uid).collection('conversations').doc(id);
+  const snap = await docRef.get();
+  if (!snap.exists) return null;
+  const updateData: any = { updatedAt: Date.now() };
+  if (updates.title !== undefined) updateData.title = String(updates.title).trim();
+  if (updates.type !== undefined) updateData.type = updates.type;
+  if (Array.isArray(updates.messages)) updateData.messages = updates.messages;
+  await docRef.update(updateData);
+  const docData = (await docRef.get()).data()!;
+  return {
+    id,
+    title: docData.title,
+    createdAt: docData.createdAt,
+    updatedAt: docData.updatedAt,
+    type: docData.type,
+    messages: docData.messages || []
+  };
+}
+
+async function deleteUserConversation(uid: string, id: string): Promise<boolean> {
+  if (!firestoreDb) throw new Error('Firestore is not initialized');
+  await firestoreDb.collection('users').doc(uid).collection('conversations').doc(id).delete();
+  return true;
+}
+
+async function clearAllUserConversations(uid: string): Promise<void> {
+  if (!firestoreDb) throw new Error('Firestore is not initialized');
+  const snap = await firestoreDb.collection('users').doc(uid).collection('conversations').get();
+  if (snap.empty) return;
+  const batch = firestoreDb.batch();
+  snap.docs.forEach(doc => batch.delete(doc.ref));
+  await batch.commit();
+}
+
+function getMemoryContextPromptForUser(memories: Array<{ content: string }>): string {
+  if (!memories || memories.length === 0) return '';
+  const lines = memories.slice(0, 25).map(m => `- ${m.content}`);
   return `\n# ACTIVE USER MEMORIES & PREVIOUS CONTEXT:\n${lines.join('\n')}\nUse these remembered details naturally in conversation when relevant—never robotically say "I remember that you told me..." unless directly asked.\n`;
+}
+
+async function autoExtractMemoryForUser(uid: string, userText: string) {
+  const lower = userText.toLowerCase().trim();
+  if (lower.endsWith('?') || lower.startsWith('who ') || lower.startsWith('what ') || lower.startsWith('how ')) {
+    return;
+  }
+  if (
+    lower.includes('my name is ') ||
+    lower.includes('call me ') ||
+    lower.includes('remember that ') ||
+    lower.includes('remember: ') ||
+    lower.includes('my favorite ')
+  ) {
+    const memoryFact = userText.replace(/^(please |zoya |hey zoya |hi zoya )/i, '').trim();
+    if (memoryFact.length > 5 && memoryFact.length < 200) {
+      try {
+        const existing = await getUserMemories(uid);
+        if (!existing.some(m => m.content.toLowerCase() === memoryFact.toLowerCase())) {
+          await saveUserMemory(uid, { content: memoryFact, category: 'general' });
+        }
+      } catch (e: any) {
+        console.warn(`[Firestore] Failed to auto-extract memory for ${uid}:`, e.message);
+      }
+    }
+  }
 }
 
 function getPersonalityInstruction(mode: string = 'Default Zoya'): string {
@@ -387,11 +762,12 @@ async function synthesizeZoyaSpeech(ai: GoogleGenAI, text: string): Promise<stri
     return ttsCache[cacheKey];
   }
 
-  // Primary Gemini TTS models with Zephyr voice
+  // Primary Gemini TTS models with Zephyr voice (fast, highly available first)
   const ttsModels = [
+    'gemini-3.1-flash-tts-preview',
+    'gemini-2.5-flash-preview-tts',
     'gemini-3.8-flash-lite-tts',
     'gemini-3.8-flash-tts',
-    'gemini-2.5-flash-preview-tts',
   ];
   const now = Date.now();
 
@@ -456,9 +832,9 @@ async function generateWithFallback(
   responseMimeType?: string
 ) {
   const modelsToTry = [
-    'gemini-3.1-flash-lite',
     'gemini-flash-lite-latest',
     'gemini-3.5-flash-lite',
+    'gemini-3.1-flash-lite',
     'gemini-3-flash-preview',
   ];
   let lastErr: any = null;
@@ -517,33 +893,6 @@ async function generateWithFallback(
   throw lastErr;
 }
 
-function autoExtractMemoryFromText(userText: string) {
-  const lower = userText.toLowerCase().trim();
-  // Only auto-extract explicit memory requests or clear personal introductions, never questions or casual "I am..." phrases
-  if (lower.endsWith('?') || lower.startsWith('who ') || lower.startsWith('what ') || lower.startsWith('how ')) {
-    return;
-  }
-  if (
-    lower.includes('my name is ') ||
-    lower.includes('call me ') ||
-    lower.includes('remember that ') ||
-    lower.includes('remember: ') ||
-    lower.includes('my favorite ')
-  ) {
-    const memoryFact = userText.replace(/^(please |zoya |hey zoya |hi zoya )/i, '').trim();
-    if (memoryFact.length > 5 && memoryFact.length < 200 && !serverMemories.some(m => m.content.toLowerCase() === memoryFact.toLowerCase())) {
-      serverMemories.unshift({
-        id: `mem_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-        content: memoryFact,
-        category: 'general',
-        timestamp: Date.now()
-      });
-      serverMemories = serverMemories.slice(0, 100);
-      saveServerMemories();
-    }
-  }
-}
-
 function cleanSpokenText(raw: string): string {
   return raw
     .replace(/\*\*/g, '')
@@ -576,210 +925,183 @@ async function startServer() {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  // REST Memories API
-  app.get('/api/memories', (_req, res) => {
-    res.json({ memories: serverMemories });
+  // REST Memories API (Authenticated per Firebase UID)
+  app.get('/api/memories', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
+    try {
+      const memories = await getUserMemories(req.uid!);
+      res.json({ memories });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || 'Failed to fetch memories' });
+    }
   });
 
-  app.post('/api/memories', (req, res) => {
+  app.post('/api/memories', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
     try {
-      const { content, category } = req.body;
+      const { content, category, id } = req.body;
       if (!content || typeof content !== 'string') {
         return res.status(400).json({ error: 'Content is required' });
       }
-      const trimmed = content.trim();
-      const existing = serverMemories.find(m => m.content.toLowerCase() === trimmed.toLowerCase());
-      if (!existing) {
-        const newMemory = {
-          id: req.body.id || `mem_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-          content: trimmed,
-          category: category || 'general',
-          timestamp: Date.now()
-        };
-        serverMemories.unshift(newMemory);
-        serverMemories = serverMemories.slice(0, 100);
-        saveServerMemories();
-        return res.json({ success: true, memory: newMemory, count: serverMemories.length });
-      }
-      res.json({ success: true, memory: existing, count: serverMemories.length });
+      const memory = await saveUserMemory(req.uid!, { id, content, category });
+      const userMems = await getUserMemories(req.uid!);
+      res.json({ success: true, memory, count: userMems.length });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: e.message || 'Failed to save memory' });
     }
   });
 
-  app.put('/api/memories/:id', (req, res) => {
+  app.put('/api/memories/:id', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
     try {
       const { id } = req.params;
       const { content, category } = req.body;
-      const idx = serverMemories.findIndex(m => m.id === id);
-      if (idx === -1) {
+      const updated = await updateUserMemory(req.uid!, id, { content, category });
+      if (!updated) {
         return res.status(404).json({ error: 'Memory not found' });
       }
-      if (content && typeof content === 'string') {
-        serverMemories[idx].content = content.trim();
-      }
-      if (category && typeof category === 'string') {
-        serverMemories[idx].category = category.trim();
-      }
-      serverMemories[idx].timestamp = Date.now();
-      saveServerMemories();
-      res.json({ success: true, memory: serverMemories[idx] });
+      res.json({ success: true, memory: updated });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: e.message || 'Failed to update memory' });
     }
   });
 
-  app.delete('/api/memories/:id', (req, res) => {
+  app.delete('/api/memories/:id', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
     try {
       const { id } = req.params;
-      serverMemories = serverMemories.filter(m => m.id !== id);
-      saveServerMemories();
-      res.json({ success: true, count: serverMemories.length });
+      await deleteUserMemory(req.uid!, id);
+      const userMems = await getUserMemories(req.uid!);
+      res.json({ success: true, count: userMems.length });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: e.message || 'Failed to delete memory' });
     }
   });
 
-  app.delete('/api/memories', (_req, res) => {
+  app.delete('/api/memories', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
     try {
-      serverMemories = [];
-      saveServerMemories();
+      await clearAllUserMemories(req.uid!);
       res.json({ success: true, count: 0 });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: e.message || 'Failed to clear memories' });
     }
   });
 
-  // REST Reminders API
-  app.get('/api/reminders', (_req, res) => {
-    res.json({ reminders: serverReminders });
+  // REST Reminders API (Authenticated per Firebase UID)
+  app.get('/api/reminders', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
+    try {
+      const reminders = await getUserReminders(req.uid!);
+      res.json({ reminders });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || 'Failed to fetch reminders' });
+    }
   });
 
-  app.post('/api/reminders', (req, res) => {
+  app.post('/api/reminders', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
     try {
-      const { title, datetime, repeat, note } = req.body;
+      const { title, datetime, repeat, note, completed, id, createdAt } = req.body;
       if (!title || typeof title !== 'string') {
         return res.status(400).json({ error: 'Title is required' });
       }
-      const newReminder = {
-        id: req.body.id || `rem_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-        title: title.trim(),
-        datetime: datetime || new Date(Date.now() + 3600000).toISOString(),
-        repeat: repeat || 'none',
-        note: note ? String(note).trim() : undefined,
-        completed: Boolean(req.body.completed),
-        createdAt: req.body.createdAt || Date.now()
-      };
-      serverReminders.unshift(newReminder);
-      saveServerReminders();
-      res.json({ success: true, reminder: newReminder });
+      const reminder = await saveUserReminder(req.uid!, {
+        id,
+        title,
+        datetime,
+        repeat,
+        note,
+        completed,
+        createdAt
+      });
+      res.json({ success: true, reminder });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: e.message || 'Failed to create reminder' });
     }
   });
 
-  app.put('/api/reminders/:id', (req, res) => {
+  app.put('/api/reminders/:id', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
     try {
       const { id } = req.params;
-      const idx = serverReminders.findIndex(r => r.id === id);
-      if (idx === -1) {
+      const updated = await updateUserReminder(req.uid!, id, req.body);
+      if (!updated) {
         return res.status(404).json({ error: 'Reminder not found' });
       }
-      serverReminders[idx] = { ...serverReminders[idx], ...req.body, id };
-      saveServerReminders();
-      res.json({ success: true, reminder: serverReminders[idx] });
+      res.json({ success: true, reminder: updated });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: e.message || 'Failed to update reminder' });
     }
   });
 
-  app.delete('/api/reminders/:id', (req, res) => {
+  app.delete('/api/reminders/:id', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
     try {
       const { id } = req.params;
-      serverReminders = serverReminders.filter(r => r.id !== id);
-      saveServerReminders();
-      res.json({ success: true, count: serverReminders.length });
+      await deleteUserReminder(req.uid!, id);
+      const userReminders = await getUserReminders(req.uid!);
+      res.json({ success: true, count: userReminders.length });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: e.message || 'Failed to delete reminder' });
     }
   });
 
-  // REST Conversations / Chat History API
-  app.get('/api/conversations', (_req, res) => {
-    res.json({ conversations: serverConversations });
-  });
-
-  app.post('/api/conversations', (req, res) => {
+  // REST Conversations / Chat History API (Authenticated per Firebase UID)
+  app.get('/api/conversations', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
     try {
-      const { id, title, type, messages } = req.body;
-      const newConv = {
-        id: id || `conv_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-        title: title ? String(title).trim() : 'New Conversation',
-        createdAt: req.body.createdAt || Date.now(),
-        updatedAt: req.body.updatedAt || Date.now(),
-        type: type || 'text',
-        messages: Array.isArray(messages) ? messages : []
-      };
-      // Upsert
-      const existingIdx = serverConversations.findIndex(c => c.id === newConv.id);
-      if (existingIdx !== -1) {
-        serverConversations[existingIdx] = newConv;
-      } else {
-        serverConversations.unshift(newConv);
-      }
-      serverConversations = serverConversations.slice(0, 100);
-      saveServerConversations();
-      res.json({ success: true, conversation: newConv });
+      const conversations = await getUserConversations(req.uid!);
+      res.json({ conversations });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: e.message || 'Failed to fetch conversations' });
     }
   });
 
-  app.put('/api/conversations/:id', (req, res) => {
+  app.post('/api/conversations', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
+    try {
+      const { id, title, type, messages, createdAt, updatedAt } = req.body;
+      const conversation = await saveUserConversation(req.uid!, {
+        id,
+        title,
+        type,
+        messages,
+        createdAt,
+        updatedAt
+      });
+      res.json({ success: true, conversation });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || 'Failed to save conversation' });
+    }
+  });
+
+  app.put('/api/conversations/:id', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
     try {
       const { id } = req.params;
-      const idx = serverConversations.findIndex(c => c.id === id);
-      if (idx === -1) {
+      const updated = await updateUserConversation(req.uid!, id, req.body);
+      if (!updated) {
         return res.status(404).json({ error: 'Conversation not found' });
       }
-      serverConversations[idx] = {
-        ...serverConversations[idx],
-        ...req.body,
-        id,
-        updatedAt: Date.now()
-      };
-      saveServerConversations();
-      res.json({ success: true, conversation: serverConversations[idx] });
+      res.json({ success: true, conversation: updated });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: e.message || 'Failed to update conversation' });
     }
   });
 
-  app.delete('/api/conversations/:id', (req, res) => {
+  app.delete('/api/conversations/:id', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
     try {
       const { id } = req.params;
-      serverConversations = serverConversations.filter(c => c.id !== id);
-      saveServerConversations();
-      res.json({ success: true, count: serverConversations.length });
+      await deleteUserConversation(req.uid!, id);
+      const userConvs = await getUserConversations(req.uid!);
+      res.json({ success: true, count: userConvs.length });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: e.message || 'Failed to delete conversation' });
     }
   });
 
-  app.delete('/api/conversations', (_req, res) => {
+  app.delete('/api/conversations', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
     try {
-      serverConversations = [];
-      saveServerConversations();
+      await clearAllUserConversations(req.uid!);
       res.json({ success: true, count: 0 });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: e.message || 'Failed to clear conversations' });
     }
   });
 
-  // REST Image Generation API
-  app.post('/api/generate-image', async (req, res) => {
+  // REST Image Generation API (Authenticated per Firebase UID)
+  app.post('/api/generate-image', verifyFirebaseToken, async (_req: AuthenticatedRequest, res) => {
     try {
-      const { prompt, aspectRatio } = req.body;
+      const { prompt, aspectRatio } = _req.body;
       if (!prompt || typeof prompt !== 'string') {
         return res.status(400).json({ error: 'Prompt is required' });
       }
@@ -856,37 +1178,37 @@ async function startServer() {
     }
   });
 
-  // Fast REST Chat Endpoint (with optional TTS synthesis and personality mode)
-  app.post('/api/chat', async (req, res) => {
+  // Fast REST Chat Endpoint (Authenticated per Firebase UID)
+  app.post('/api/chat', verifyFirebaseToken, async (req: AuthenticatedRequest, res) => {
     try {
+      const uid = req.uid!;
       const { text, memories, includeAudio, personalityMode, conversationHistory: clientHistory } = req.body;
       const ai = getAIClient();
       if (!ai) {
         return res.status(500).json({ error: 'GEMINI_API_KEY is not configured.' });
       }
 
+      // Load authenticated user's memories from Firestore
+      let userMems = await getUserMemories(uid);
+
       if (memories && Array.isArray(memories)) {
-        memories.forEach((m: string) => {
-          if (typeof m === 'string' && !serverMemories.some(sm => sm.content.toLowerCase() === m.toLowerCase())) {
-            serverMemories.unshift({
-              id: `mem_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-              content: m,
-              category: 'general',
-              timestamp: Date.now()
-            });
+        for (const m of memories) {
+          if (typeof m === 'string' && m.trim() && !userMems.some(sm => sm.content.toLowerCase() === m.toLowerCase().trim())) {
+            await saveUserMemory(uid, { content: m.trim(), category: 'general' });
           }
-        });
-        saveServerMemories();
+        }
+        userMems = await getUserMemories(uid);
       }
 
       if (text) {
-        autoExtractMemoryFromText(text);
+        await autoExtractMemoryForUser(uid, text);
+        userMems = await getUserMemories(uid);
       }
 
       const fullInstruction =
         BASE_ZOYA_SYSTEM_INSTRUCTION +
         getPersonalityInstruction(personalityMode) +
-        getMemoryContextPrompt();
+        getMemoryContextPromptForUser(userMems);
 
       let contents: any = text || 'Hey';
       if (Array.isArray(clientHistory) && clientHistory.length > 0) {
@@ -937,11 +1259,13 @@ async function startServer() {
   wss.on('connection', (clientWs: WebSocket) => {
     console.log('[WebSocket] Client connected to /live');
     
+    let authenticatedUid: string | null = null;
+    let userMemoriesCache: Array<{ id: string; content: string }> = [];
+
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(JSON.stringify({ 
         type: 'STATUS', 
-        status: 'CONNECTED',
-        memories: serverMemories.map(m => m.content)
+        status: 'CONNECTED'
       }));
     }
 
@@ -1019,7 +1343,9 @@ async function startServer() {
         return;
       }
 
-      autoExtractMemoryFromText(trimmed);
+      if (authenticatedUid) {
+        await autoExtractMemoryForUser(authenticatedUid, trimmed);
+      }
 
       if (!ai) {
         await sendSpokenReply("Hey, my AI key isn't connected right now. Check the server configuration.", currentTurnId);
@@ -1031,11 +1357,14 @@ async function startServer() {
         const antiRepeatHint = lastSpokenModelReply
           ? `\n# RECENT REPLY NOTE:\nYour immediately preceding spoken response was: "${lastSpokenModelReply}". Do NOT repeat an old answer for a new question. Respond directly to the user's latest message below.\n`
           : '';
+        const userMemories = authenticatedUid
+          ? (userMemoriesCache.length > 0 ? userMemoriesCache : await getUserMemories(authenticatedUid))
+          : [];
         const currentInstruction =
           BASE_ZOYA_SYSTEM_INSTRUCTION +
           getPersonalityInstruction(userPersonalityMode) +
           timeContext +
-          getMemoryContextPrompt() +
+          getMemoryContextPromptForUser(userMemories) +
           antiRepeatHint;
         const contents = [
           ...conversationHistory.slice(-12),
@@ -1058,25 +1387,33 @@ async function startServer() {
           for (const fc of formattedCalls) {
             if (fc.name === 'saveMemory' && fc.args?.content) {
               const fact = String(fc.args.content).trim();
-              if (!serverMemories.some(m => m.content.toLowerCase() === fact.toLowerCase())) {
-                serverMemories.unshift({
-                  id: `mem_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-                  content: fact,
-                  category: fc.args.category || 'general',
-                  timestamp: Date.now()
-                });
-                saveServerMemories();
-              }
-              if (!spokenReply) {
-                spokenReply = `Got it, I'll keep that in mind.`;
+              if (authenticatedUid) {
+                const currentMems = await getUserMemories(authenticatedUid);
+                if (!currentMems.some(m => m.content.toLowerCase() === fact.toLowerCase())) {
+                  await saveUserMemory(authenticatedUid, {
+                    content: fact,
+                    category: fc.args.category || 'general'
+                  });
+                  userMemoriesCache = await getUserMemories(authenticatedUid);
+                }
+                if (!spokenReply) {
+                  spokenReply = `Got it, I'll keep that in mind.`;
+                }
+              } else {
+                spokenReply = "Please sign in with Google so I can save that to your personal memories.";
               }
             } else if (fc.name === 'getMemories') {
-              if (!spokenReply) {
-                if (serverMemories.length > 0) {
-                  spokenReply = `Here's what I know about you so far: ${serverMemories.slice(0, 5).map(m => m.content).join('. ')}.`;
-                } else {
-                  spokenReply = `You haven't asked me to remember anything specific yet. Tell me whenever you want me to keep something in mind.`;
+              if (authenticatedUid) {
+                const currentMems = await getUserMemories(authenticatedUid);
+                if (!spokenReply) {
+                  if (currentMems.length > 0) {
+                    spokenReply = `Here's what I know about you so far: ${currentMems.slice(0, 5).map(m => m.content).join('. ')}.`;
+                  } else {
+                    spokenReply = `You haven't asked me to remember anything specific yet. Tell me whenever you want me to keep something in mind.`;
+                  }
                 }
+              } else {
+                spokenReply = "Please sign in with Google so I can access your personal memories.";
               }
             } else if (fc.name === 'openWebsite' && fc.args?.url) {
               if (!spokenReply) {
@@ -1087,19 +1424,19 @@ async function startServer() {
                 spokenReply = `Opening ${fc.args.appName} now.`;
               }
             } else if (fc.name === 'createReminder' && fc.args?.title) {
-              const reminderItem = {
-                id: `rem_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-                title: String(fc.args.title).trim(),
-                datetime: fc.args.time ? String(fc.args.time) : new Date(Date.now() + 3600000).toISOString(),
-                repeat: 'none',
-                note: 'Created via Zoya voice',
-                completed: false,
-                createdAt: Date.now()
-              };
-              serverReminders.unshift(reminderItem);
-              saveServerReminders();
-              if (!spokenReply) {
-                spokenReply = `Done. I've set a reminder for ${fc.args.title} at ${fc.args.time || 'that time'}.`;
+              if (authenticatedUid) {
+                await saveUserReminder(authenticatedUid, {
+                  title: String(fc.args.title).trim(),
+                  datetime: fc.args.time ? String(fc.args.time) : new Date(Date.now() + 3600000).toISOString(),
+                  repeat: 'none',
+                  note: 'Created via Zoya voice',
+                  completed: false
+                });
+                if (!spokenReply) {
+                  spokenReply = `Done. I've set a reminder for ${fc.args.title} at ${fc.args.time || 'that time'}.`;
+                }
+              } else {
+                spokenReply = "Please sign in with Google so I can set reminders on your personal account.";
               }
             } else if (fc.name === 'getBatteryStatus' || fc.name === 'getDeviceInfo') {
               if (!spokenReply) {
@@ -1306,6 +1643,45 @@ Respond in strict JSON format only.`;
       try {
         const msg = JSON.parse(data.toString());
         
+        // Handle WebSocket token authentication
+        if (msg.type === 'auth') {
+          const token = msg.token;
+          if (!token || typeof token !== 'string') {
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ type: 'AUTH_ERROR', error: 'Authentication token is required' }));
+            }
+            return;
+          }
+          if (!firebaseAdminApp) {
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ type: 'AUTH_ERROR', error: 'Firebase Admin not initialized on server' }));
+            }
+            return;
+          }
+          try {
+            const decoded = await getAdminAuth(firebaseAdminApp).verifyIdToken(token);
+            authenticatedUid = decoded.uid;
+            console.log(`[WebSocket] Client authenticated as UID: ${authenticatedUid}`);
+            userMemoriesCache = await getUserMemories(authenticatedUid);
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({
+                type: 'AUTH_SUCCESS',
+                uid: authenticatedUid,
+                memories: userMemoriesCache.map(m => m.content)
+              }));
+            }
+          } catch (err: any) {
+            console.warn('[WebSocket] Token verification failed:', err.message);
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({
+                type: 'AUTH_ERROR',
+                error: 'Invalid or expired Firebase token'
+              }));
+            }
+          }
+          return;
+        }
+
         // Handle user interruption (barge-in): cancel any in-flight reply immediately
         if (msg.type === 'INTERRUPT') {
           if (typeof msg.clientTurnId === 'number' && msg.clientTurnId > activeTurnId) {
@@ -1322,17 +1698,15 @@ Respond in strict JSON format only.`;
 
         // Sync user memories from client
         if (msg.type === 'SYNC_MEMORIES' && Array.isArray(msg.memories)) {
-          msg.memories.forEach((mem: string) => {
-            if (typeof mem === 'string' && !serverMemories.some(sm => sm.content.toLowerCase() === mem.toLowerCase())) {
-              serverMemories.unshift({
-                id: `mem_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-                content: mem,
-                category: 'general',
-                timestamp: Date.now()
-              });
+          if (authenticatedUid) {
+            const existing = await getUserMemories(authenticatedUid);
+            for (const mem of msg.memories) {
+              if (typeof mem === 'string' && mem.trim() && !existing.some(em => em.content.toLowerCase() === mem.toLowerCase().trim())) {
+                await saveUserMemory(authenticatedUid, { content: mem.trim(), category: 'general' });
+              }
             }
-          });
-          saveServerMemories();
+            userMemoriesCache = await getUserMemories(authenticatedUid);
+          }
           return;
         }
 
@@ -1373,20 +1747,19 @@ Respond in strict JSON format only.`;
         // Handle tool responses from client
         if (msg.toolResponse) {
           if (msg.toolResponse.functionResponses) {
-            msg.toolResponse.functionResponses.forEach((fr: any) => {
-              if (fr.name === 'saveMemory' && fr.response?.memory_saved) {
-                const saved = fr.response.memory_saved;
-                if (!serverMemories.some(m => m.content.toLowerCase() === String(saved).toLowerCase())) {
-                  serverMemories.unshift({
-                    id: `mem_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-                    content: String(saved),
-                    category: 'general',
-                    timestamp: Date.now()
+            for (const fr of msg.toolResponse.functionResponses) {
+              if (fr.name === 'saveMemory' && fr.response?.memory_saved && authenticatedUid) {
+                const saved = String(fr.response.memory_saved).trim();
+                const existing = await getUserMemories(authenticatedUid);
+                if (!existing.some(m => m.content.toLowerCase() === saved.toLowerCase())) {
+                  await saveUserMemory(authenticatedUid, {
+                    content: saved,
+                    category: 'general'
                   });
-                  saveServerMemories();
+                  userMemoriesCache = await getUserMemories(authenticatedUid);
                 }
               }
-            });
+            }
           }
           return;
         }
@@ -1425,7 +1798,7 @@ Respond in strict JSON format only.`;
   }
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
+    console.log(`Server running on port ${PORT}`);
   });
 }
 

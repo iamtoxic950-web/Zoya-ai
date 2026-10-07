@@ -2,6 +2,7 @@ import { pcmToWavBase64, base64ToPcm } from '../utils/audio';
 import { AssistantState } from '../types';
 import { memoryService } from './MemoryService';
 import { getAudioContext, unlockAudioContext } from '../utils/sfx';
+import { auth } from '../lib/firebase';
 
 type StartupSequenceState = 'IDLE' | 'INITIALIZING' | 'DISPATCHED' | 'PLAYING' | 'COMPLETED';
 
@@ -116,6 +117,8 @@ export class GeminiLiveSession {
   private audioQueue: QueuedAudioChunk[] = [];
   private enqueuedChunkHashes: Set<string> = new Set();
   private isPlayingQueueChunk = false;
+  private nextAudioChunkStartTime = 0;
+  private activeScheduledChunkCount = 0;
 
   private thinkingSafetyTimer: any = null;
   private wsReconnectTimer: any = null;
@@ -903,6 +906,16 @@ export class GeminiLiveSession {
           this.sessionError = null;
 
           if (ws.readyState === WebSocket.OPEN) {
+            // Send Firebase ID token authentication message
+            const currentUser = auth.currentUser;
+            if (currentUser) {
+              currentUser.getIdToken().then((token) => {
+                if (this.ws === ws && ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'auth', token }));
+                }
+              }).catch((e) => console.warn('[GeminiLiveSession] Token fetch error:', e));
+            }
+
             const cachedMemories = memoryService.getMemoriesList();
             if (cachedMemories.length > 0) {
               ws.send(
@@ -970,6 +983,16 @@ export class GeminiLiveSession {
 
           try {
             const msg = JSON.parse(event.data);
+
+            if (msg.type === 'AUTH_SUCCESS') {
+              console.log('[WebSocket] Successfully authenticated with backend user:', msg.uid);
+              return;
+            }
+
+            if (msg.type === 'AUTH_ERROR') {
+              console.warn('[WebSocket] Authentication error from backend:', msg.error);
+              return;
+            }
 
             // Stale response protection: reject any message from an older or cancelled response ID
             if (typeof msg.turnId === 'number') {
@@ -1159,6 +1182,8 @@ export class GeminiLiveSession {
     this.enqueuedChunkHashes.clear();
     this.activePlaybackResponseId = null;
     this.isPlayingQueueChunk = false;
+    this.nextAudioChunkStartTime = 0;
+    this.activeScheduledChunkCount = 0;
     this.isSpeaking = false;
     if (this.browserSpeechSafetyTimer) {
       clearTimeout(this.browserSpeechSafetyTimer);
@@ -1188,8 +1213,8 @@ export class GeminiLiveSession {
   }
 
   /**
-   * Enqueues an audio chunk for the active response ID after verifying it is not stale,
-   * cancelled, or a duplicate chunk.
+   * Enqueues an audio chunk for the active response ID and immediately schedules playback.
+   * Progressively queues and plays chunks the moment they arrive from Gemini.
    */
   private enqueueResponseAudioChunk(responseId: number, base64Pcm: string) {
     if (!this.isCurrentSession() || !base64Pcm) return;
@@ -1199,10 +1224,10 @@ export class GeminiLiveSession {
 
     const chunkHash = `${responseId}:${base64Pcm.length}:${base64Pcm.slice(0, 32)}:${base64Pcm.slice(-32)}`;
     if (this.enqueuedChunkHashes.has(chunkHash)) {
-      return; // Never enqueue the exact same chunk twice
+      return; // Never enqueue duplicate chunks
     }
 
-    // If a previous response was still playing, cancel and flush it before starting the new response
+    // If a new response starts, cancel and cleanly flush any previous response's audio
     if (this.activePlaybackResponseId !== null && this.activePlaybackResponseId !== responseId) {
       this.cancelledResponseIds.add(this.activePlaybackResponseId);
       this.stopCurrentAudioPlayback();
@@ -1212,50 +1237,16 @@ export class GeminiLiveSession {
     this.enqueuedChunkHashes.add(chunkHash);
     this.audioQueue.push({ responseId, chunkHash, base64Pcm });
 
-    if (!this.isPlayingQueueChunk) {
-      this.playNextQueuedChunk();
-    }
+    this.scheduleQueuedChunks();
   }
 
   /**
-   * Plays exactly one queued audio chunk at a time in strict FIFO order.
-   * Guarantees zero overlapping audio streams, immediate cancellation of remaining chunks,
-   * and automatic recovery if the audio pipeline fails or suspends.
+   * Schedules audio chunks progressively onto AudioContext.currentTime timeline.
+   * Seamless gapless playback between chunks with zero latency, zero overlapping noise,
+   * and clean completion when the final chunk finishes.
    */
-  private playNextQueuedChunk() {
-    if (!this.isCurrentSession()) {
-      this.isPlayingQueueChunk = false;
-      return;
-    }
-
-    if (this.chunkPlaybackSafetyTimer) {
-      clearTimeout(this.chunkPlaybackSafetyTimer);
-      this.chunkPlaybackSafetyTimer = null;
-    }
-
-    const expectedSessionId = this.sessionId;
-
-    // Discard any stale or cancelled chunks at the front of the queue
-    while (
-      this.audioQueue.length > 0 &&
-      (this.audioQueue[0].responseId !== this.activeClientTurnId ||
-        this.cancelledResponseIds.has(this.audioQueue[0].responseId))
-    ) {
-      this.audioQueue.shift();
-    }
-
-    if (this.audioQueue.length === 0) {
-      this.isPlayingQueueChunk = false;
-      this.activePlaybackResponseId = null;
-      if (globalStartupSequenceState === 'PLAYING' || this.isAwaitingStartupGreeting()) {
-        globalStartupSequenceState = 'COMPLETED';
-      }
-      this.lastAISpeakEndTime = Date.now();
-      if (this.isSocketOpen()) {
-        this.setAuthoritativeState(this.getReadyListeningOrIdleState());
-      }
-      return;
-    }
+  private scheduleQueuedChunks() {
+    if (!this.isCurrentSession()) return;
 
     if (!this.ensureOutputAudioGraph() || !sharedOutputAudioCtx || !sharedOutputAnalyser) {
       this.handleAudioPlaybackFailure();
@@ -1266,82 +1257,86 @@ export class GeminiLiveSession {
       sharedOutputAudioCtx.resume().catch(() => {});
     }
 
-    const item = this.audioQueue.shift()!;
-    this.isPlayingQueueChunk = true;
+    const expectedSessionId = this.sessionId;
+    const currentGen = globalPlaybackGeneration;
 
-    try {
-      // Ensure no previous AudioBufferSourceNode is still playing before starting this chunk
-      for (const existingNode of globalActiveSourceNodes) {
-        try {
-          existingNode.onended = null;
-          existingNode.stop();
-          existingNode.disconnect();
-        } catch (e) {}
+    while (this.audioQueue.length > 0) {
+      // Discard stale or cancelled chunks
+      if (
+        this.audioQueue[0].responseId !== this.activeClientTurnId ||
+        this.cancelledResponseIds.has(this.audioQueue[0].responseId)
+      ) {
+        this.audioQueue.shift();
+        continue;
       }
-      globalActiveSourceNodes.clear();
 
-      const currentGen = globalPlaybackGeneration;
+      const item = this.audioQueue.shift()!;
       const pcmData = base64ToPcm(item.base64Pcm);
-      if (pcmData.length === 0) {
-        this.isPlayingQueueChunk = false;
-        this.playNextQueuedChunk();
-        return;
-      }
+      if (pcmData.length === 0) continue;
 
-      const audioBuffer = sharedOutputAudioCtx.createBuffer(1, pcmData.length, 24000);
-      audioBuffer.getChannelData(0).set(pcmData);
+      try {
+        const audioBuffer = sharedOutputAudioCtx.createBuffer(1, pcmData.length, 24000);
+        audioBuffer.getChannelData(0).set(pcmData);
 
-      const source = sharedOutputAudioCtx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(sharedOutputAnalyser);
-      globalActiveSourceNodes.add(source);
+        const source = sharedOutputAudioCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(sharedOutputAnalyser);
+        globalActiveSourceNodes.add(source);
 
-      if (!this.isSpeaking) {
-        this.lastAISpeakStartTime = Date.now();
-        this.setAuthoritativeState('SPEAKING');
-        this.resetCurrentUtteranceCapture();
-      }
+        const ctxTime = sharedOutputAudioCtx.currentTime;
+        const startTime = Math.max(ctxTime + 0.005, this.nextAudioChunkStartTime);
+        this.nextAudioChunkStartTime = startTime + audioBuffer.duration;
+        this.activeScheduledChunkCount++;
 
-      let chunkCompleted = false;
-      const completeChunkOnce = () => {
-        if (chunkCompleted) return;
-        chunkCompleted = true;
-
-        if (this.chunkPlaybackSafetyTimer) {
-          clearTimeout(this.chunkPlaybackSafetyTimer);
-          this.chunkPlaybackSafetyTimer = null;
+        if (!this.isSpeaking) {
+          this.isPlayingQueueChunk = true;
+          this.lastAISpeakStartTime = Date.now();
+          this.setAuthoritativeState('SPEAKING');
+          this.resetCurrentUtteranceCapture();
         }
 
-        source.onended = null;
-        globalActiveSourceNodes.delete(source);
-        try {
-          source.disconnect();
-        } catch (e) {}
+        let chunkHandled = false;
+        const handleChunkEnded = () => {
+          if (chunkHandled) return;
+          chunkHandled = true;
 
-        if (
-          !this.isCurrentSession() ||
-          this.sessionId !== expectedSessionId ||
-          globalPlaybackGeneration !== currentGen ||
-          this.cancelledResponseIds.has(item.responseId)
-        ) {
-          this.isPlayingQueueChunk = false;
-          return;
-        }
+          source.onended = null;
+          globalActiveSourceNodes.delete(source);
+          try {
+            source.disconnect();
+          } catch (e) {}
 
-        this.isPlayingQueueChunk = false;
-        this.playNextQueuedChunk();
-      };
+          this.activeScheduledChunkCount = Math.max(0, this.activeScheduledChunkCount - 1);
 
-      source.onended = completeChunkOnce;
+          if (
+            !this.isCurrentSession() ||
+            this.sessionId !== expectedSessionId ||
+            globalPlaybackGeneration !== currentGen ||
+            this.cancelledResponseIds.has(item.responseId)
+          ) {
+            return;
+          }
 
-      // Guard against suspended/interrupted AudioContext never firing source.onended
-      const safetyDurationMs = Math.max(1500, Math.ceil(audioBuffer.duration * 1000) + 1200);
-      this.chunkPlaybackSafetyTimer = setTimeout(completeChunkOnce, safetyDurationMs);
+          // If no more chunks are currently queued or scheduled, speech turn has cleanly completed
+          if (this.activeScheduledChunkCount === 0 && this.audioQueue.length === 0) {
+            this.isPlayingQueueChunk = false;
+            this.activePlaybackResponseId = null;
+            this.nextAudioChunkStartTime = 0;
+            if (globalStartupSequenceState === 'PLAYING' || this.isAwaitingStartupGreeting()) {
+              globalStartupSequenceState = 'COMPLETED';
+            }
+            this.lastAISpeakEndTime = Date.now();
+            if (this.isSocketOpen()) {
+              this.setAuthoritativeState(this.getReadyListeningOrIdleState());
+            }
+          }
+        };
 
-      source.start(0);
-    } catch (e) {
-      console.warn('Audio playback error, recovering pipeline:', e);
-      this.handleAudioPlaybackFailure();
+        source.onended = handleChunkEnded;
+        source.start(startTime);
+      } catch (err) {
+        console.warn('Audio scheduling notice:', err);
+      }
     }
   }
 
@@ -1412,12 +1407,19 @@ export class GeminiLiveSession {
     }
   }
 
-  private executeRestFallback(trimmed: string, expectedSessionId: number, expectedTurnId: number) {
+  private async executeRestFallback(trimmed: string, expectedSessionId: number, expectedTurnId: number) {
     if (this.sessionId !== expectedSessionId || !this.isCurrentSession()) return;
+
+    const user = auth.currentUser;
+    const token = user ? await user.getIdToken().catch(() => null) : null;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
 
     fetch('/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({
         text: trimmed,
         memories: memoryService.getMemoriesList(),
