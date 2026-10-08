@@ -17,7 +17,12 @@ import {
   User as UserIcon,
   LogIn,
   LogOut,
-  ShieldCheck
+  ShieldCheck,
+  Smartphone,
+  Layers,
+  Activity,
+  Globe,
+  ExternalLink
 } from 'lucide-react';
 import { UserSettings, ZoyaPersonalityMode } from '../../types';
 import { settingsService } from '../../services/SettingsService';
@@ -25,6 +30,8 @@ import { memoryService } from '../../services/MemoryService';
 import { chatHistoryService } from '../../services/ChatHistoryService';
 import { reminderService } from '../../services/ReminderService';
 import { useAuth } from '../../context/AuthContext';
+import { ZoyaNativeBridge, isNativeAndroid } from '../../services/ZoyaNativeBridge';
+import { getApiBaseUrl, setApiBaseUrl } from '../../config/api';
 
 interface SettingsViewProps {
   onBackToVoice: () => void;
@@ -37,6 +44,31 @@ export function SettingsView({ onBackToVoice, onOpenMenu }: SettingsViewProps) {
   const [saveToast, setSaveToast] = useState(false);
   const [isMicTesting, setIsMicTesting] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
+
+  // Native Android & Bridge status state
+  const isAndroid = isNativeAndroid();
+  const [accessibilityEnabled, setAccessibilityEnabled] = useState(false);
+  const [overlayGranted, setOverlayGranted] = useState(false);
+  const [foregroundRunning, setForegroundRunning] = useState(false);
+  const [hudActive, setHudActive] = useState(false);
+  const [customApiUrl, setCustomApiUrl] = useState(getApiBaseUrl());
+  const [isApiUrlEditing, setIsApiUrlEditing] = useState(false);
+
+  useEffect(() => {
+    if (isAndroid) {
+      ZoyaNativeBridge.isAccessibilityServiceEnabled().then((res) => {
+        setAccessibilityEnabled(res.enabled);
+      }).catch(() => {});
+
+      ZoyaNativeBridge.checkOverlayPermission().then((res) => {
+        setOverlayGranted(res.granted);
+      }).catch(() => {});
+
+      ZoyaNativeBridge.isForegroundServiceRunning().then((res) => {
+        setForegroundRunning(res.running);
+      }).catch(() => {});
+    }
+  }, [isAndroid]);
 
   useEffect(() => {
     const unsub = settingsService.subscribe((s) => {
@@ -432,7 +464,202 @@ export function SettingsView({ onBackToVoice, onOpenMenu }: SettingsViewProps) {
           </div>
         </section>
 
-        {/* Section 5: Data & Reset */}
+        {/* Section 5: Android Native Bridge & System Integrations */}
+        <section className="p-4 sm:p-5 rounded-2xl border border-cyan-500/25 bg-[#00101f]/70 backdrop-blur-md space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-cyan-300">
+              <Smartphone className="w-4 h-4 text-cyan-400" />
+              <h3 className="text-xs font-bold tracking-widest uppercase">
+                Android Native System & Permissions
+              </h3>
+            </div>
+            <span className="text-[10px] px-2 py-0.5 rounded border border-cyan-500/30 bg-cyan-950/30 text-cyan-300">
+              {isAndroid ? 'Android Runtime' : 'Web Browser Preview'}
+            </span>
+          </div>
+
+          <p className="text-[11px] text-cyan-300/70 font-sans leading-relaxed">
+            Configure system accessibility, persistent floating HUD notch, background audio services, and Render backend endpoints.
+          </p>
+
+          <div className="space-y-3 pt-1">
+            {/* Accessibility Service Item */}
+            <div className="p-3.5 rounded-xl border border-cyan-500/20 bg-[#000a14]/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-cyan-200 flex items-center gap-2">
+                  <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Zoya Accessibility Service</span>
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded ${accessibilityEnabled ? 'bg-emerald-950/50 text-emerald-400 border border-emerald-500/30' : 'bg-amber-950/40 text-amber-300 border border-amber-500/30'}`}>
+                    {accessibilityEnabled ? 'ENABLED' : 'MANUAL APPROVAL REQUIRED'}
+                  </span>
+                </div>
+                <div className="text-[10px] text-cyan-400/60 font-sans mt-1">
+                  Enables legitimate assistant actions (reading permitted screen content on request, navigation, tapping actions).
+                </div>
+              </div>
+
+              <button
+                onClick={() => {
+                  if (isAndroid) {
+                    ZoyaNativeBridge.openAccessibilitySettings();
+                  } else {
+                    alert('Accessibility Service settings are only available on an Android device.');
+                  }
+                }}
+                className="px-3 py-1.5 rounded-xl border border-cyan-500/40 bg-cyan-950/40 hover:bg-cyan-900 text-cyan-300 hover:text-cyan-100 text-xs uppercase tracking-wider flex items-center gap-1.5 self-start sm:self-auto cursor-pointer transition-colors shrink-0"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>Open Accessibility Settings</span>
+              </button>
+            </div>
+
+            {/* Floating HUD Notch Item */}
+            <div className="p-3.5 rounded-xl border border-cyan-500/20 bg-[#000a14]/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-cyan-200 flex items-center gap-2">
+                  <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Floating Dynamic HUD Notch</span>
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded ${overlayGranted ? 'bg-emerald-950/50 text-emerald-400 border border-emerald-500/30' : 'bg-cyan-950/40 text-cyan-300 border border-cyan-500/30'}`}>
+                    {overlayGranted ? 'OVERLAY GRANTED' : 'PERMISSION REQUIRED'}
+                  </span>
+                </div>
+                <div className="text-[10px] text-cyan-400/60 font-sans mt-1">
+                  Displays futuristic top notch pill showing live assistant state, transcript, and audio activity above other apps.
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 self-start sm:self-auto shrink-0">
+                {!overlayGranted ? (
+                  <button
+                    onClick={() => {
+                      if (isAndroid) {
+                        ZoyaNativeBridge.requestOverlayPermission().then((res) => {
+                          setOverlayGranted(res.granted);
+                        });
+                      } else {
+                        alert('Floating HUD overlay is only available on an Android device.');
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded-xl border border-amber-500/40 bg-amber-950/30 text-amber-300 hover:text-amber-100 text-xs uppercase tracking-wider cursor-pointer transition-colors"
+                  >
+                    Grant Overlay
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      if (isAndroid) {
+                        if (hudActive) {
+                          ZoyaNativeBridge.hideHUD();
+                          setHudActive(false);
+                        } else {
+                          ZoyaNativeBridge.showHUD({ text: 'ZOYA AI ACTIVE' });
+                          setHudActive(true);
+                        }
+                      } else {
+                        alert('Floating HUD toggle is only active on an Android device.');
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded-xl border border-cyan-500/40 bg-cyan-950/50 text-cyan-200 hover:text-white text-xs uppercase tracking-wider cursor-pointer transition-colors"
+                  >
+                    {hudActive ? 'Hide Notch' : 'Show Notch'}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Android Foreground Service Item */}
+            <div className="p-3.5 rounded-xl border border-cyan-500/20 bg-[#000a14]/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-cyan-200 flex items-center gap-2">
+                  <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Foreground Assistant Service</span>
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded ${foregroundRunning ? 'bg-emerald-950/50 text-emerald-400 border border-emerald-500/30' : 'bg-cyan-950/40 text-cyan-400 border border-cyan-500/30'}`}>
+                    {foregroundRunning ? 'ACTIVE' : 'STANDBY'}
+                  </span>
+                </div>
+                <div className="text-[10px] text-cyan-400/60 font-sans mt-1">
+                  Maintains continuous audio and live WebSocket assistant connection with Android persistent notification.
+                </div>
+              </div>
+
+              <button
+                onClick={() => {
+                  if (isAndroid) {
+                    if (foregroundRunning) {
+                      ZoyaNativeBridge.stopForegroundService().then(() => setForegroundRunning(false));
+                    } else {
+                      ZoyaNativeBridge.startForegroundService().then(() => setForegroundRunning(true));
+                    }
+                  } else {
+                    alert('Foreground service runs natively on Android devices.');
+                  }
+                }}
+                className="px-3 py-1.5 rounded-xl border border-cyan-500/40 bg-cyan-950/40 text-cyan-300 hover:text-cyan-100 text-xs uppercase tracking-wider self-start sm:self-auto cursor-pointer transition-colors shrink-0"
+              >
+                {foregroundRunning ? 'Stop Service' : 'Start Service'}
+              </button>
+            </div>
+
+            {/* Render Backend Endpoint Override */}
+            <div className="p-3.5 rounded-xl border border-cyan-500/20 bg-[#000a14]/60 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-bold text-cyan-200 flex items-center gap-2">
+                  <Globe className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Render Backend Endpoint URL</span>
+                </div>
+                <button
+                  onClick={() => setIsApiUrlEditing(!isApiUrlEditing)}
+                  className="text-[10px] text-cyan-400 hover:text-cyan-200 underline cursor-pointer"
+                >
+                  {isApiUrlEditing ? 'Done' : 'Configure URL'}
+                </button>
+              </div>
+
+              <div className="text-[10px] text-cyan-400/60 font-sans">
+                Active: <span className="font-mono text-cyan-300">{customApiUrl || '(Same-Origin Web Server)'}</span>
+              </div>
+
+              {isApiUrlEditing && (
+                <div className="flex flex-col sm:flex-row items-center gap-2 pt-1">
+                  <input
+                    type="url"
+                    value={customApiUrl}
+                    onChange={(e) => setCustomApiUrl(e.target.value)}
+                    placeholder="https://zoya-ai.onrender.com"
+                    className="w-full bg-[#00040B] border border-cyan-500/40 rounded-lg px-3 py-1.5 text-xs text-cyan-200 focus:outline-none focus:border-cyan-400"
+                  />
+                  <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+                    <button
+                      onClick={() => {
+                        setApiBaseUrl(customApiUrl);
+                        setIsApiUrlEditing(false);
+                        setSaveToast(true);
+                        setTimeout(() => setSaveToast(false), 1800);
+                      }}
+                      className="px-3 py-1.5 bg-cyan-950 border border-cyan-400 text-cyan-200 text-xs rounded-lg uppercase tracking-wider cursor-pointer hover:bg-cyan-900"
+                    >
+                      Save
+                    </button>
+                    <button
+                      onClick={() => {
+                        setCustomApiUrl('');
+                        setApiBaseUrl(null);
+                        setIsApiUrlEditing(false);
+                        setSaveToast(true);
+                        setTimeout(() => setSaveToast(false), 1800);
+                      }}
+                      className="px-3 py-1.5 border border-red-500/40 text-red-400 text-xs rounded-lg uppercase tracking-wider cursor-pointer hover:bg-red-950/30"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+
+        {/* Section 6: Data & Reset */}
         <section className="p-4 sm:p-5 rounded-2xl border border-cyan-500/25 bg-[#00101f]/70 backdrop-blur-md space-y-3">
           <div className="flex items-center gap-2 text-cyan-300">
             <Database className="w-4 h-4 text-cyan-400" />

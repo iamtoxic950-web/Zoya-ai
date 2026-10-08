@@ -3,6 +3,8 @@ import { AssistantState } from '../types';
 import { memoryService } from './MemoryService';
 import { getAudioContext, unlockAudioContext } from '../utils/sfx';
 import { auth } from '../lib/firebase';
+import { getLiveWebSocketUrl, getApiEndpoint } from '../config/api';
+import { ZoyaNativeBridge, isNativeAndroid } from './ZoyaNativeBridge';
 
 type StartupSequenceState = 'IDLE' | 'INITIALIZING' | 'DISPATCHED' | 'PLAYING' | 'COMPLETED';
 
@@ -221,6 +223,16 @@ export class GeminiLiveSession {
     if (this.currentState === resolvedState) return;
     this.currentState = resolvedState;
     this.onStateChange?.(resolvedState);
+
+    // Synchronize native Android floating HUD state if on Android
+    if (isNativeAndroid()) {
+      ZoyaNativeBridge.updateHUDState({
+        listening: resolvedState === 'LISTENING',
+        speaking: resolvedState === 'SPEAKING',
+        processing: resolvedState === 'THINKING',
+        statusText: `ZOYA ${resolvedState}`
+      }).catch(() => {});
+    }
   }
 
   public hasLiveMicTrack(): boolean {
@@ -879,8 +891,8 @@ export class GeminiLiveSession {
       };
 
       try {
-        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ws = new WebSocket(`${protocol}//${location.host}/live`);
+        const wsUrl = getLiveWebSocketUrl();
+        const ws = new WebSocket(wsUrl);
         this.ws = ws;
 
         ws.onopen = () => {
@@ -1417,7 +1429,7 @@ export class GeminiLiveSession {
       headers['Authorization'] = `Bearer ${token}`;
     }
 
-    fetch('/api/chat', {
+    fetch(getApiEndpoint('/api/chat'), {
       method: 'POST',
       headers,
       body: JSON.stringify({

@@ -15,6 +15,7 @@ import { chatHistoryService } from '../../services/ChatHistoryService';
 import { settingsService } from '../../services/SettingsService';
 import { memoryService } from '../../services/MemoryService';
 import { auth } from '../../lib/firebase';
+import { getApiEndpoint } from '../../config/api';
 
 interface ChatViewProps {
   onBackToVoice: () => void;
@@ -82,7 +83,7 @@ export function ChatView({ onBackToVoice, onOpenMenu, personalityMode }: ChatVie
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const response = await fetch('/api/chat', {
+      const response = await fetch(getApiEndpoint('/api/chat'), {
         method: 'POST',
         headers,
         body: JSON.stringify({

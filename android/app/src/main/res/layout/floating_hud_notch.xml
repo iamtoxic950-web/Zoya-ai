@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/zoyaHudRoot"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:gravity="center_horizontal"
+    android:padding="4dp">
+
+    <!-- Compact Floating Dynamic Notch / Pill -->
+    <LinearLayout
+        android:id="@+id/zoyaPillContainer"
+        android:layout_width="wrap_content"
+        android:layout_height="36dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@drawable/hud_notch_background"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:clickable="true"
+        android:focusable="true">
+
+        <!-- Glowing holographic AI orb dot -->
+        <View
+            android:id="@+id/zoyaOrbIndicator"
+            android:layout_width="10dp"
+            android:layout_height="10dp"
+            android:background="@drawable/hud_orb_cyan" />
+
+        <!-- Status / Transcription / Assistant Pill Text -->
+        <TextView
+            android:id="@+id/zoyaPillText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_marginEnd="6dp"
+            android:text="ZOYA AI"
+            android:textColor="#00E5FF"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:fontFamily="monospace"
+            android:singleLine="true"
+            android:ellipsize="end"
+            android:maxWidth="220dp" />
+
+        <!-- Micro close / minimize button -->
+        <TextView
+            android:id="@+id/zoyaCloseBtn"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:gravity="center"
+            android:text="✕"
+            android:textColor="#80D8FF"
+            android:textSize="10sp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:focusable="true" />
+    </LinearLayout>
+
+    <!-- Expanded Compact Card (Visible on tap) -->
+    <LinearLayout
+        android:id="@+id/zoyaExpandedPanel"
+        android:layout_width="280dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:orientation="vertical"
+        android:background="@drawable/hud_card_background"
+        android:padding="12dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/zoyaExpandedTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="NEURAL CORE ACTIVE"
+            android:textColor="#64FFDA"
+            android:textSize="10sp"
+            android:fontFamily="monospace"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/zoyaExpandedBody"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Listening for voice commands. Tap anywhere to open full console."
+            android:textColor="#E0F7FA"
+            android:textSize="12sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:orientation="horizontal"
+            android:gravity="end">
+
+            <Button
+                android:id="@+id/zoyaOpenAppBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="28dp"
+                android:text="Open Zoya"
+                android:textSize="10sp"
+                android:textColor="#00040B"
+                android:background="@drawable/hud_button_cyan"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp" />
+        </LinearLayout>
+    </LinearLayout>
+
+</LinearLayout>

@@ -4,10 +4,7 @@ import { GeminiLiveSession } from '../services/GeminiLiveSession';
 import { playDeactivationSound, playStateChangeSound } from '../utils/sfx';
 import { memoryService } from '../services/MemoryService';
 import { reminderService } from '../services/ReminderService';
-
-// Zoya Android Bridge definition
-import { Capacitor, registerPlugin } from '@capacitor/core';
-const ZoyaAndroidBridge = registerPlugin<any>('ZoyaAndroidBridge');
+import { ZoyaNativeBridge, isNativeAndroid } from '../services/ZoyaNativeBridge';
 
 export interface HudMessage {
   id: string;
@@ -182,7 +179,7 @@ export function useVoiceAssistant() {
         'getNetworkStatus', 'readClipboard', 'writeClipboard',
         'pickFile', 'takePicture', 'readContacts', 'readCalendar'
       ].includes(call.name)) {
-        if (Capacitor.getPlatform() === 'web') {
+        if (!isNativeAndroid()) {
           if (call.name === 'openApp') {
             const rawApp = String(call.args?.appName || '').toLowerCase().trim();
             const appUrlMap: Record<string, string> = {
@@ -221,7 +218,7 @@ export function useVoiceAssistant() {
           }
         } else {
           try {
-            const res = await ZoyaAndroidBridge.dispatchFunction({ name: call.name, args: call.args || {} });
+            const res = await ZoyaNativeBridge.dispatchFunction({ name: call.name, args: call.args || {} });
             response = { success: true, result: res };
           } catch (e: any) {
             console.error(`Android bridge error for ${call.name}:`, e);

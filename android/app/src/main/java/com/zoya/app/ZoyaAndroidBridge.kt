@@ -1,42 +1,143 @@
 package com.zoya.app
 
-import android.Manifest
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import com.getcapacitor.JSObject
-import com.getcapacitor.PermissionState
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
-import com.getcapacitor.annotation.Permission
-import com.getcapacitor.annotation.PermissionCallback
 
-@CapacitorPlugin(
-    name = "ZoyaAndroidBridge",
-    permissions = [
-        Permission(
-            strings = [Manifest.permission.CAMERA],
-            alias = "camera"
-        ),
-        Permission(
-            strings = [Manifest.permission.READ_CONTACTS],
-            alias = "contacts"
-        ),
-        Permission(
-            strings = [Manifest.permission.READ_CALENDAR],
-            alias = "calendar"
-        )
-    ]
-)
+@CapacitorPlugin(name = "ZoyaAndroidBridge")
 class ZoyaAndroidBridge : Plugin() {
 
     private lateinit var dispatcher: FunctionDispatcher
-    private var pendingCall: PluginCall? = null
-    private var pendingName: String? = null
-    private var pendingArgs: JSObject? = null
 
     override fun load() {
         super.load()
-        dispatcher = FunctionDispatcher(context, activity)
+        dispatcher = FunctionDispatcher(context)
+    }
+
+    @PluginMethod
+    fun isAndroidPlatform(call: PluginCall) {
+        val ret = JSObject().apply {
+            put("isAndroid", true)
+            put("platform", "android")
+        }
+        call.resolve(ret)
+    }
+
+    @PluginMethod
+    fun openAppSettings(call: PluginCall) {
+        try {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.fromParts("package", context.packageName, null)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            call.resolve(JSObject().put("success", true))
+        } catch (e: Exception) {
+            call.reject("Failed to open application settings: ${e.message}", e)
+        }
+    }
+
+    @PluginMethod
+    fun openAccessibilitySettings(call: PluginCall) {
+        try {
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            call.resolve(JSObject().put("success", true))
+        } catch (e: Exception) {
+            call.reject("Failed to open accessibility settings: ${e.message}", e)
+        }
+    }
+
+    @PluginMethod
+    fun isAccessibilityServiceEnabled(call: PluginCall) {
+        val isEnabled = dispatcher.accessibilityManager.isEnabled()
+        call.resolve(JSObject().put("enabled", isEnabled))
+    }
+
+    @PluginMethod
+    fun checkOverlayPermission(call: PluginCall) {
+        val granted = dispatcher.overlayManager.hasPermission()
+        call.resolve(JSObject().put("granted", granted))
+    }
+
+    @PluginMethod
+    fun requestOverlayPermission(call: PluginCall) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!Settings.canDrawOverlays(context)) {
+                try {
+                    val intent = Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:${context.packageName}")
+                    ).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                    call.resolve(JSObject().put("granted", false))
+                    return
+                } catch (e: Exception) {
+                    call.reject("Failed to open overlay permission settings: ${e.message}", e)
+                    return
+                }
+            }
+        }
+        call.resolve(JSObject().put("granted", true))
+    }
+
+    @PluginMethod
+    fun showHUD(call: PluginCall) {
+        val text = call.getString("text") ?: "ZOYA AI"
+        val success = dispatcher.overlayManager.showOverlay(text)
+        call.resolve(JSObject().put("success", success))
+    }
+
+    @PluginMethod
+    fun hideHUD(call: PluginCall) {
+        val success = dispatcher.overlayManager.hideOverlay()
+        call.resolve(JSObject().put("success", success))
+    }
+
+    @PluginMethod
+    fun updateHUDState(call: PluginCall) {
+        val listening = call.getBoolean("listening", false) ?: false
+        val speaking = call.getBoolean("speaking", false) ?: false
+        val processing = call.getBoolean("processing", false) ?: false
+        val statusText = call.getString("statusText")
+
+        dispatcher.overlayManager.updateState(listening, speaking, processing, statusText)
+        call.resolve(JSObject().put("success", true))
+    }
+
+    @PluginMethod
+    fun startForegroundService(call: PluginCall) {
+        try {
+            ZoyaForegroundService.start(context)
+            call.resolve(JSObject().put("success", true))
+        } catch (e: Exception) {
+            call.reject("Failed to start foreground service: ${e.message}", e)
+        }
+    }
+
+    @PluginMethod
+    fun stopForegroundService(call: PluginCall) {
+        try {
+            ZoyaForegroundService.stop(context)
+            call.resolve(JSObject().put("success", true))
+        } catch (e: Exception) {
+            call.reject("Failed to stop foreground service: ${e.message}", e)
+        }
+    }
+
+    @PluginMethod
+    fun isForegroundServiceRunning(call: PluginCall) {
+        call.resolve(JSObject().put("running", ZoyaForegroundService.isServiceRunning))
     }
 
     @PluginMethod
@@ -49,58 +150,11 @@ class ZoyaAndroidBridge : Plugin() {
             return
         }
 
-        // Check if this action requires permission
-        val requiredAlias = when (name) {
-            "takePicture" -> "camera"
-            "readContacts" -> "contacts"
-            "readCalendar" -> "calendar"
-            else -> null
-        }
-
-        if (requiredAlias != null) {
-            if (getPermissionState(requiredAlias) != PermissionState.GRANTED) {
-                pendingCall = call
-                pendingName = name
-                pendingArgs = args
-                requestPermissionForAlias(requiredAlias, call, "permissionCallback")
-                return
-            }
-        }
-
-        executeDispatch(name, args, call)
-    }
-
-    @PermissionCallback
-    private fun permissionCallback(call: PluginCall) {
-        val pCall = pendingCall
-        val pName = pendingName
-        val pArgs = pendingArgs
-
-        if (pCall != null && pName != null && pArgs != null) {
-            val requiredAlias = when (pName) {
-                "takePicture" -> "camera"
-                "readContacts" -> "contacts"
-                "readCalendar" -> "calendar"
-                else -> null
-            }
-
-            if (requiredAlias != null && getPermissionState(requiredAlias) == PermissionState.GRANTED) {
-                executeDispatch(pName, pArgs, pCall)
-            } else {
-                pCall.reject("Permission denied for $pName")
-            }
-        }
-        
-        pendingCall = null
-        pendingName = null
-        pendingArgs = null
-    }
-
-    private fun executeDispatch(name: String, args: JSObject, call: PluginCall) {
         try {
             val result = dispatcher.dispatch(name, args)
-            val ret = JSObject()
-            ret.put("result", result)
+            val ret = JSObject().apply {
+                put("result", result)
+            }
             call.resolve(ret)
         } catch (e: Exception) {
             call.reject(e.message, e)

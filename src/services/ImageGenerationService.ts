@@ -1,5 +1,6 @@
 import { doc, setDoc, collection, getDocs, query, orderBy, limit } from 'firebase/firestore';
 import { db, auth, handleFirestoreError, OperationType } from '../lib/firebase';
+import { getApiEndpoint } from '../config/api';
 
 export type ImageGenerationErrorType = 'QUOTA_EXHAUSTED' | 'PAID_REQUIRED' | 'NETWORK_ERROR' | 'UNKNOWN';
 
@@ -65,8 +66,7 @@ class ImageGenerationService {
     }
     this.lastRequestTime = now;
 
-    const baseUrl = (import.meta as any).env?.VITE_API_BASE_URL || '';
-    const endpoint = `${baseUrl}/api/generate-image`;
+    const endpoint = getApiEndpoint('/api/generate-image');
 
     let response: Response;
     try {
