@@ -141,6 +141,28 @@ class ZoyaAndroidBridge : Plugin() {
     }
 
     @PluginMethod
+    fun isMacroDroidAvailable(call: PluginCall) {
+        val available = dispatcher.macroDroidBridge.isAvailable()
+        call.resolve(JSObject().put("available", available))
+    }
+
+    @PluginMethod
+    fun executeMacroDroidCommand(call: PluginCall) {
+        val action = call.getString("action") ?: call.getString("command") ?: ""
+        val target = call.getString("target")
+        val value = call.getString("value")
+        val text = call.getString("text")
+
+        val resJson = dispatcher.macroDroidBridge.executeCommand(action, target, value, text)
+        val ret = JSObject().apply {
+            put("success", resJson.optBoolean("success", false))
+            put("action", resJson.optString("action", action))
+            put("message", resJson.optString("message", ""))
+        }
+        call.resolve(ret)
+    }
+
+    @PluginMethod
     fun dispatchFunction(call: PluginCall) {
         val name = call.getString("name")
         val args = call.getObject("args") ?: JSObject()

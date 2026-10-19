@@ -8,6 +8,20 @@ export interface NativeHUDState {
   transcript?: string;
 }
 
+export interface MacroDroidPayload {
+  action: string;
+  target?: string;
+  value?: string;
+  text?: string;
+  command?: string;
+}
+
+export interface MacroDroidResult {
+  success: boolean;
+  action: string;
+  message: string;
+}
+
 export interface ZoyaNativeBridgePlugin {
   // Platform & Environment
   isAndroidPlatform(): Promise<{ isAndroid: boolean; platform: string }>;
@@ -28,6 +42,10 @@ export interface ZoyaNativeBridgePlugin {
   startForegroundService(): Promise<{ success: boolean }>;
   stopForegroundService(): Promise<{ success: boolean }>;
   isForegroundServiceRunning(): Promise<{ running: boolean }>;
+
+  // MacroDroid Automation Bridge
+  isMacroDroidAvailable(): Promise<{ available: boolean }>;
+  executeMacroDroidCommand(payload: MacroDroidPayload): Promise<MacroDroidResult>;
 
   // Generic Function Dispatcher (Accessibility actions, apps, device status)
   dispatchFunction(options: { name: string; args?: any }): Promise<{ result: any }>;
@@ -70,6 +88,16 @@ const ZoyaNativeBridge = registerPlugin<ZoyaNativeBridgePlugin>('ZoyaAndroidBrid
     },
     async isForegroundServiceRunning() {
       return { running: false };
+    },
+    async isMacroDroidAvailable() {
+      return { available: false };
+    },
+    async executeMacroDroidCommand(payload: MacroDroidPayload) {
+      return {
+        success: false,
+        action: payload.action,
+        message: 'MacroDroid automation is only available on Android native devices.'
+      };
     },
     async dispatchFunction(options: { name: string; args?: any }) {
       return { result: { message: `Web mock: ${options.name}` } };

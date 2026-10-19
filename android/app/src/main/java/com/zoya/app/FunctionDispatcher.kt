@@ -8,11 +8,26 @@ class FunctionDispatcher(private val context: Context) {
     val accessibilityManager = AccessibilityManager(context)
     val overlayManager = OverlayManager(context)
     val deviceManager = DeviceManager(context)
+    val macroDroidBridge = MacroDroidBridge(context)
 
     fun dispatch(name: String, args: JSObject): JSObject {
         val result = JSObject()
 
         when (name) {
+            "executeMacroDroidCommand" -> {
+                val action = args.getString("action") ?: args.getString("command") ?: ""
+                val target = args.getString("target")
+                val value = args.getString("value")
+                val text = args.getString("text")
+
+                val resJson = macroDroidBridge.executeCommand(action, target, value, text)
+                result.put("success", resJson.optBoolean("success", false))
+                result.put("action", resJson.optString("action", action))
+                result.put("message", resJson.optString("message", ""))
+            }
+            "isMacroDroidAvailable" -> {
+                result.put("available", macroDroidBridge.isAvailable())
+            }
             "openApp" -> {
                 val appName = args.getString("appName") ?: ""
                 result.put("success", deviceManager.openApp(appName))

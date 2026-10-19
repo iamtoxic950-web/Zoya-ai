@@ -5,6 +5,8 @@ import { playDeactivationSound, playStateChangeSound } from '../utils/sfx';
 import { memoryService } from '../services/MemoryService';
 import { reminderService } from '../services/ReminderService';
 import { ZoyaNativeBridge, isNativeAndroid } from '../services/ZoyaNativeBridge';
+import { zoyaAndroid } from '../services/ZoyaAndroidService';
+import { routeCommandIntent } from '../services/CommandRouter';
 
 export interface HudMessage {
   id: string;
@@ -179,40 +181,43 @@ export function useVoiceAssistant() {
         'getNetworkStatus', 'readClipboard', 'writeClipboard',
         'pickFile', 'takePicture', 'readContacts', 'readCalendar'
       ].includes(call.name)) {
-        if (!isNativeAndroid()) {
-          if (call.name === 'openApp') {
-            const rawApp = String(call.args?.appName || '').toLowerCase().trim();
-            const appUrlMap: Record<string, string> = {
-              youtube: 'https://www.youtube.com',
-              spotify: 'https://open.spotify.com',
-              google: 'https://www.google.com',
-              gmail: 'https://mail.google.com',
-              whatsapp: 'https://web.whatsapp.com',
-              github: 'https://github.com',
-              instagram: 'https://www.instagram.com',
-              netflix: 'https://www.netflix.com',
-              maps: 'https://maps.google.com'
-            };
-            const matchedKey = Object.keys(appUrlMap).find(k => rawApp.includes(k));
-            const targetUrl = matchedKey ? appUrlMap[matchedKey] : `https://www.google.com/search?q=${encodeURIComponent(call.args?.appName || '')}`;
-            window.open(targetUrl, '_blank');
-            response = { success: true, opened_app: call.args?.appName, opened_url: targetUrl };
-          } else if (call.name === 'createReminder') {
-            const title = String(call.args?.title || 'Reminder');
-            const scheduledAt = call.args?.time || new Date(Date.now() + 3600000).toISOString();
-            await reminderService.createReminder({
-              title,
-              datetime: scheduledAt,
-              repeat: 'none'
-            }).catch(() => {});
-            if (isMountedRef.current && sessionRef.current === activeSession && activeSession.isCurrentSession()) {
-              addHudMessage("REMINDER CREATED", `${title} scheduled in Firestore`, 3000);
-            }
-            response = { success: true, reminder: `${title} scheduled for ${scheduledAt}` };
-          } else if (call.name === 'getDeviceInfo') {
+        // Execute automation through safe zoyaAndroid automation bridge
+        if (call.name === 'openApp') {
+          const appName = String(call.args?.appName || '').trim();
+          const actionRes = await zoyaAndroid.executeAction({
+            action: 'OPEN_APP',
+            target: appName
+          });
+          response = {
+            success: actionRes.success,
+            opened_app: appName,
+            message: actionRes.message
+          };
+        } else if (call.name === 'createReminder') {
+          const title = String(call.args?.title || 'Reminder');
+          const scheduledAt = call.args?.time || new Date(Date.now() + 3600000).toISOString();
+          await reminderService.createReminder({
+            title,
+            datetime: scheduledAt,
+            repeat: 'none'
+          }).catch(() => {});
+          const actionRes = await zoyaAndroid.executeAction({
+            action: 'CREATE_REMINDER',
+            target: title,
+            value: scheduledAt
+          });
+          if (isMountedRef.current && sessionRef.current === activeSession && activeSession.isCurrentSession()) {
+            addHudMessage("REMINDER CREATED", `${title} scheduled in Firestore`, 3000);
+          }
+          response = { success: true, reminder: `${title} scheduled for ${scheduledAt}`, macro: actionRes.message };
+        } else if (call.name === 'getBatteryStatus') {
+          const actionRes = await zoyaAndroid.executeAction({
+            action: 'GET_BATTERY_STATUS'
+          });
+          response = { success: true, result: actionRes.message };
+        } else if (!isNativeAndroid()) {
+          if (call.name === 'getDeviceInfo') {
             response = { success: true, result: { model: 'Web Client', platform: 'web', osVersion: navigator.userAgent } };
-          } else if (call.name === 'getBatteryStatus') {
-            response = { success: true, result: { batteryLevel: 100, isCharging: true } };
           } else {
             response = { error: 'Not available on web preview. Requires Android device companion.' };
           }

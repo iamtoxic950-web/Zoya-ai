@@ -22,7 +22,8 @@ import {
   Layers,
   Activity,
   Globe,
-  ExternalLink
+  ExternalLink,
+  Cpu
 } from 'lucide-react';
 import { UserSettings, ZoyaPersonalityMode } from '../../types';
 import { settingsService } from '../../services/SettingsService';
@@ -31,6 +32,7 @@ import { chatHistoryService } from '../../services/ChatHistoryService';
 import { reminderService } from '../../services/ReminderService';
 import { useAuth } from '../../context/AuthContext';
 import { ZoyaNativeBridge, isNativeAndroid } from '../../services/ZoyaNativeBridge';
+import { zoyaAndroid } from '../../services/ZoyaAndroidService';
 import { getApiBaseUrl, setApiBaseUrl } from '../../config/api';
 
 interface SettingsViewProps {
@@ -53,6 +55,7 @@ export function SettingsView({ onBackToVoice, onOpenMenu }: SettingsViewProps) {
   const [hudActive, setHudActive] = useState(false);
   const [customApiUrl, setCustomApiUrl] = useState(getApiBaseUrl());
   const [isApiUrlEditing, setIsApiUrlEditing] = useState(false);
+  const [macroDroidAvailable, setMacroDroidAvailable] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (isAndroid) {
@@ -67,6 +70,14 @@ export function SettingsView({ onBackToVoice, onOpenMenu }: SettingsViewProps) {
       ZoyaNativeBridge.isForegroundServiceRunning().then((res) => {
         setForegroundRunning(res.running);
       }).catch(() => {});
+
+      zoyaAndroid.isMacroDroidAvailable().then((avail) => {
+        setMacroDroidAvailable(avail);
+      }).catch(() => {
+        setMacroDroidAvailable(false);
+      });
+    } else {
+      setMacroDroidAvailable(false);
     }
   }, [isAndroid]);
 
@@ -597,6 +608,39 @@ export function SettingsView({ onBackToVoice, onOpenMenu }: SettingsViewProps) {
                 className="px-3 py-1.5 rounded-xl border border-cyan-500/40 bg-cyan-950/40 text-cyan-300 hover:text-cyan-100 text-xs uppercase tracking-wider self-start sm:self-auto cursor-pointer transition-colors shrink-0"
               >
                 {foregroundRunning ? 'Stop Service' : 'Start Service'}
+              </button>
+            </div>
+
+            {/* MacroDroid Automation Bridge Status */}
+            <div className="p-3.5 rounded-xl border border-cyan-500/20 bg-[#000a14]/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-cyan-200 flex items-center gap-2">
+                  <Cpu className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>MacroDroid Bridge</span>
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded ${macroDroidAvailable ? 'bg-emerald-950/50 text-emerald-400 border border-emerald-500/30' : 'bg-amber-950/40 text-amber-300 border border-amber-500/30'}`}>
+                    {macroDroidAvailable ? 'Connected' : 'Unavailable'}
+                  </span>
+                </div>
+                <div className="text-[10px] text-cyan-400/60 font-sans mt-1">
+                  Intent broadcast channel (<code>com.zoya.app.ACTION_MACRODROID_COMMAND</code>) for safe system automation (apps, volume, settings, media).
+                </div>
+              </div>
+
+              <button
+                onClick={() => {
+                  if (isAndroid) {
+                    zoyaAndroid.isMacroDroidAvailable().then((avail) => {
+                      setMacroDroidAvailable(avail);
+                      setSaveToast(true);
+                      setTimeout(() => setSaveToast(false), 1800);
+                    });
+                  } else {
+                    alert('MacroDroid automation runs natively on Android devices.');
+                  }
+                }}
+                className="px-3 py-1.5 rounded-xl border border-cyan-500/40 bg-cyan-950/40 text-cyan-300 hover:text-cyan-100 text-xs uppercase tracking-wider self-start sm:self-auto cursor-pointer transition-colors shrink-0"
+              >
+                Check Bridge
               </button>
             </div>
 
